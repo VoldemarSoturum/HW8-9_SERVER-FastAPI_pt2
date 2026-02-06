@@ -1,0 +1,80 @@
+version: "3.9"
+
+x-postgres-common: &postgres-common
+  image: postgres:16
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+    interval: 2s
+    timeout: 3s
+    retries: 60
+    start_period: 10s
+
+x-python-common: &python-common
+  build: .
+  init: true
+
+services:
+  # -------------------------
+  # DEV
+  # -------------------------
+  postgres:
+    <<: *postgres-common
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ads_db}
+      POSTGRES_USER: ${POSTGRES_USER:-ads_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ads_pass}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    profiles: ["dev"]
+
+  api:
+    <<: *python-common
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "
+      alembic upgrade head &&
+      exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+      "
+    profiles: ["dev"]
+
+  # -------------------------
+  # TEST
+  # -------------------------
+  postgres_test:
+    <<: *postgres-common
+    environment:
+      POSTGRES_DB: ads_test_db
+      POSTGRES_USER: ads_user
+      POSTGRES_PASSWORD: ads_pass
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata_test:/var/lib/postgresql/data
+    profiles: ["test"]
+
+  tests:
+    <<: *python-common
+    env_file:
+      - .env.test
+    depends_on:
+      postgres_test:
+        condition: service_healthy
+    profiles: ["test"]
+    command: >
+      sh -c "
+      alembic upgrade head &&
+      exec pytest -q
+      "
+
+volumes:
+  pgdata:
+  pgdata_test:

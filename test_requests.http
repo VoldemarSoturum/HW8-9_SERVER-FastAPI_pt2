@@ -1,0 +1,432 @@
+@baseUrl = http://localhost:8000
+@json = application/json
+
+############################################################
+# HEALTHCHECK / SWAGGER
+############################################################
+
+### Открыть Swagger UI (ручная проверка эндпоинтов)
+GET {{baseUrl}}/docs
+
+
+############################################################
+# 0) ROOT LOGIN (bootstrap from env)
+# Root создаётся при старте приложения, если заданы:
+# BOOTSTRAP_ROOT_USERNAME / BOOTSTRAP_ROOT_PASSWORD
+############################################################
+
+### Логин root -> получить JWT токен (48 часов)
+# @name loginRoot
+POST {{baseUrl}}/login
+Content-Type: {{json}}
+
+{
+  "username": "root",
+  "password": "55NQ3_pKczG6IjEJXC5cMlkVDqulDAcJGDZ3kIAE0ko"
+}
+
+### Сохранить root token из ответа
+@rootToken = {{loginRoot.response.body.access_token}}
+
+
+############################################################
+# 1) USERS: CREATE USERS
+# - anon может создать только user
+# - admin/root могут создать user и admin (НО НЕ root)
+############################################################
+
+### Создать пользователя alice (anon allowed, group=user)
+# @name createAlice
+POST {{baseUrl}}/user
+Content-Type: {{json}}
+
+{
+  "username": "alice",
+  "password": "alice_pass_123",
+  "group": "user"
+}
+
+### Сохранить id alice из ответа
+@aliceId = {{createAlice.response.body.id}}
+
+
+### Создать пользователя bob (anon allowed, group=user)
+# @name createBob
+POST {{baseUrl}}/user
+Content-Type: {{json}}
+
+{
+  "username": "bob",
+  "password": "bob_pass_123",
+  "group": "user"
+}
+
+### Сохранить id bob из ответа
+@bobId = {{createBob.response.body.id}}
+
+
+### Попытка создать admin без авторизации (anon SHOULD FAIL -> 403)
+POST {{baseUrl}}/user
+Content-Type: {{json}}
+
+{
+  "username": "admin",
+  "password": "admin_pass_123",
+  "group": "admin"
+}
+
+
+### Попытка создать root через API (даже root НЕ может, root только bootstrap) -> 403
+POST {{baseUrl}}/user
+Content-Type: {{json}}
+Authorization: Bearer {{rootToken}}
+
+{
+  "username": "root2",
+  "password": "root2_pass_123",
+  "group": "root"
+}
+
+
+### Создать пользователя admin от root (root allowed -> 201)
+# @name createAdmin
+POST {{baseUrl}}/user
+Content-Type: {{json}}
+Authorization: Bearer {{rootToken}}
+
+{
+  "username": "admin",
+  "password": "admin_pass_123",
+  "group": "admin"
+}
+
+### Сохранить id admin из ответа
+@adminId = {{createAdmin.response.body.id}}
+
+
+############################################################
+# 2) LOGIN: GET TOKENS (48h)
+############################################################
+
+### Логин alice -> получить JWT токен
+# @name loginAlice
+POST {{baseUrl}}/login
+Content-Type: {{json}}
+
+{
+  "username": "alice",
+  "password": "alice_pass_123"
+}
+
+### Сохранить alice token из ответа
+@aliceToken = {{loginAlice.response.body.access_token}}
+
+
+### Логин bob -> получить JWT токен
+# @name loginBob
+POST {{baseUrl}}/login
+Content-Type: {{json}}
+
+{
+  "username": "bob",
+  "password": "bob_pass_123"
+}
+
+### Сохранить bob token из ответа
+@bobToken = {{loginBob.response.body.access_token}}
+
+
+### Логин admin -> получить JWT токен
+# @name loginAdmin
+POST {{baseUrl}}/login
+Content-Type: {{json}}
+
+{
+  "username": "admin",
+  "password": "admin_pass_123"
+}
+
+### Сохранить admin token из ответа
+@adminToken = {{loginAdmin.response.body.access_token}}
+
+
+### Неверный пароль -> 401 Unauthorized
+POST {{baseUrl}}/login
+Content-Type: {{json}}
+
+{
+  "username": "alice",
+  "password": "wrong_password"
+}
+
+
+############################################################
+# 3) USER ROUTES (READ / UPDATE / LIST)
+# anon:
+#   - POST /user
+#   - GET  /user/{id}
+# user:
+#   - PATCH/DELETE only self
+# admin/root:
+#   - любые действия (кроме создания root и установки group=root через PATCH)
+############################################################
+
+### Получить пользователя по id (anon allowed)
+GET {{baseUrl}}/user/{{aliceId}}
+
+
+### Обновить СЕБЯ (alice) -> 200 OK
+PATCH {{baseUrl}}/user/{{aliceId}}
+Content-Type: {{json}}
+Authorization: Bearer {{aliceToken}}
+
+{
+  "username": "alice_new"
+}
+
+
+### Попытка изменить чужого пользователя (bob -> alice) -> 403 Forbidden
+PATCH {{baseUrl}}/user/{{aliceId}}
+Content-Type: {{json}}
+Authorization: Bearer {{bobToken}}
+
+{
+  "username": "hacked_name"
+}
+
+
+### Изменить пользователя админом (admin -> alice) -> 200 OK
+PATCH {{baseUrl}}/user/{{aliceId}}
+Content-Type: {{json}}
+Authorization: Bearer {{adminToken}}
+
+{
+  "username": "alice_admin_edited"
+}
+
+
+### Получить список пользователей (admin allowed) -> 200 OK
+GET {{baseUrl}}/user
+Authorization: Bearer {{adminToken}}
+
+
+### Получить список пользователей (root allowed) -> 200 OK
+GET {{baseUrl}}/user
+Authorization: Bearer {{rootToken}}
+
+
+### Попытка получить список пользователей обычным user (alice) -> 403 Forbidden
+GET {{baseUrl}}/user
+Authorization: Bearer {{aliceToken}}
+
+
+### Попытка установить group=root через PATCH (даже admin/root НЕ должен) -> 403 Forbidden
+PATCH {{baseUrl}}/user/{{aliceId}}
+Content-Type: {{json}}
+Authorization: Bearer {{adminToken}}
+
+{
+  "group": "root"
+}
+
+
+############################################################
+# 4) ADVERTISEMENTS
+# anon allowed:
+#   - GET /advertisement/{id}
+#   - GET /advertisement?... (search)
+# user/admin/root:
+#   - POST /advertisement
+#   - PATCH/DELETE только свои (admin/root: любые)
+############################################################
+
+### Попытка создать объявление без токена -> 401 Not authenticated (или 403, если так настроено)
+POST {{baseUrl}}/advertisement
+Content-Type: {{json}}
+
+{
+  "title": "Anon create should fail",
+  "description": "No token",
+  "price": "10.00",
+  "author": "anon"
+}
+
+
+### Создать объявление от alice -> 201 Created
+# @name createAdAlice
+POST {{baseUrl}}/advertisement
+Content-Type: {{json}}
+Authorization: Bearer {{aliceToken}}
+
+{
+  "title": "Продам RTX 4090",
+  "description": "Новая, в коробке. Самовывоз.",
+  "price": "2500.00",
+  "author": "Alice"
+}
+
+### Сохранить id объявления alice
+@aliceAdId = {{createAdAlice.response.body.id}}
+
+
+### Создать объявление от bob -> 201 Created
+# @name createAdBob
+POST {{baseUrl}}/advertisement
+Content-Type: {{json}}
+Authorization: Bearer {{bobToken}}
+
+{
+  "title": "Куплю RTX",
+  "description": "Ищу 3080/3090",
+  "price": "1200.00",
+  "author": "Bob"
+}
+
+### Сохранить id объявления bob
+@bobAdId = {{createAdBob.response.body.id}}
+
+
+### Получить объявление по id (anon allowed) -> 200 OK
+GET {{baseUrl}}/advertisement/{{aliceAdId}}
+
+
+### Обновить СВОЁ объявление (alice) -> 200 OK
+PATCH {{baseUrl}}/advertisement/{{aliceAdId}}
+Content-Type: {{json}}
+Authorization: Bearer {{aliceToken}}
+
+{
+  "price": "2399.99",
+  "description": "Срочно. Возможен торг."
+}
+
+
+### Попытка обновить чужое объявление (bob -> alice) -> 403 Forbidden
+PATCH {{baseUrl}}/advertisement/{{aliceAdId}}
+Content-Type: {{json}}
+Authorization: Bearer {{bobToken}}
+
+{
+  "price": "1.00"
+}
+
+
+### Обновить чужое объявление админом (admin -> alice) -> 200 OK
+PATCH {{baseUrl}}/advertisement/{{aliceAdId}}
+Content-Type: {{json}}
+Authorization: Bearer {{adminToken}}
+
+{
+  "price": "2300.00"
+}
+
+
+############################################################
+# 5) SEARCH (anon allowed)
+############################################################
+
+### Поиск по q (общий поиск по title/description/author)
+GET {{baseUrl}}/advertisement?q=rtx
+
+
+### Поиск по author
+GET {{baseUrl}}/advertisement?author=Alice
+
+
+### Поиск по title
+GET {{baseUrl}}/advertisement?title=Продам
+
+
+### Поиск по description
+GET {{baseUrl}}/advertisement?description=Ищу
+
+
+### Фильтр по цене (диапазон)
+GET {{baseUrl}}/advertisement?price_from=1000&price_to=3000
+
+
+### Пагинация (limit/offset)
+GET {{baseUrl}}/advertisement?limit=10&offset=0
+
+
+### Комбинированный запрос (q + price + пагинация)
+GET {{baseUrl}}/advertisement?q=rtx&price_from=1000&price_to=2600&limit=20&offset=0
+
+
+############################################################
+# 6) DELETE ADVERTISEMENTS (204 No Content)
+############################################################
+
+### Попытка удалить чужое объявление (bob удаляет alice) -> 403 Forbidden
+DELETE {{baseUrl}}/advertisement/{{aliceAdId}}
+Authorization: Bearer {{bobToken}}
+
+
+### Удалить СВОЁ объявление (alice) -> 204 No Content
+DELETE {{baseUrl}}/advertisement/{{aliceAdId}}
+Authorization: Bearer {{aliceToken}}
+
+
+### Удалить чужое объявление админом (admin удаляет bob) -> 204 No Content
+DELETE {{baseUrl}}/advertisement/{{bobAdId}}
+Authorization: Bearer {{adminToken}}
+
+
+############################################################
+# 7) NEGATIVE CASES (advertisements)
+############################################################
+
+### Получить несуществующее объявление -> 404 Not Found
+GET {{baseUrl}}/advertisement/9999999
+
+
+### Обновить несуществующее объявление (authorized user) -> 404 Not Found
+PATCH {{baseUrl}}/advertisement/9999999
+Content-Type: {{json}}
+Authorization: Bearer {{aliceToken}}
+
+{
+  "price": "123.45"
+}
+
+
+### Удалить несуществующее объявление (admin) -> 404 Not Found
+DELETE {{baseUrl}}/advertisement/9999999
+Authorization: Bearer {{adminToken}}
+
+
+### Создать объявление с неверной ценой (price <= 0) -> 422 Unprocessable Entity
+POST {{baseUrl}}/advertisement
+Content-Type: {{json}}
+Authorization: Bearer {{aliceToken}}
+
+{
+  "title": "Неверная цена",
+  "description": "Должно упасть с 422",
+  "price": "0",
+  "author": "Alice"
+}
+
+
+############################################################
+# 8) USER DELETE (self vs чужой vs admin/root)
+############################################################
+
+### Попытка удалить чужого пользователя (bob удаляет alice) -> 403 Forbidden
+DELETE {{baseUrl}}/user/{{aliceId}}
+Authorization: Bearer {{bobToken}}
+
+
+### Удалить СЕБЯ (alice) -> 204 No Content
+DELETE {{baseUrl}}/user/{{aliceId}}
+Authorization: Bearer {{aliceToken}}
+
+
+### Удалить пользователя админом (admin удаляет bob) -> 204 No Content
+DELETE {{baseUrl}}/user/{{bobId}}
+Authorization: Bearer {{adminToken}}
+
+
+### Удалить admin пользователем root -> 204 No Content
+DELETE {{baseUrl}}/user/{{adminId}}
+Authorization: Bearer {{rootToken}}
